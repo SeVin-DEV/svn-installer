@@ -1,251 +1,171 @@
 #!/usr/bin/env bash
 set -e
 
-echo "[BOOTSTRAP] Starting universal installer..."
+############################################
+# LOAD ENV
+############################################
 
-# =========================================================
-# LOAD .ENV
-# =========================================================
 if [ -f ".env" ]; then
   export $(grep -v '^#' .env | xargs)
 else
-  echo "[ERROR] Missing .env file"
+  echo "❌ Missing .env file"
   exit 1
 fi
 
-REPO_OWNER="${REPO_OWNER:-}"
-REPO_NAME="${REPO_NAME:-}"
-TARGET_DIR="${TARGET_DIR:-./project}"
+############################################
+# OS DETECTION
+############################################
 
-if [ -z "$REPO_OWNER" ] || [ -z "$REPO_NAME" ]; then
-  echo "[ERROR] REPO_OWNER or REPO_NAME not set in .env"
-  exit 1
+OS_TYPE="unknown"
+
+UNAME_OUT="$(uname -s)"
+
+case "$UNAME_OUT" in
+  Linux*)
+    OS_TYPE="linux"
+    ;;
+  Darwin*)
+    OS_TYPE="mac"
+    ;;
+  CYGWIN*|MINGW*|MSYS*)
+    OS_TYPE="windows"
+    ;;
+esac
+
+# Termux detection
+if [ -n "$PREFIX" ] && [ -d "/data/data/com.termux" ]; then
+  OS_TYPE="termux"
 fi
 
-REPO_FULL="$REPO_OWNER/$REPO_NAME"
+# iSH (iOS Alpine shell)
+if [ -f "/usr/bin/ish" ] || [ -n "$ISH" ]; then
+  OS_TYPE="ish"
+fi
 
-# =========================================================
-# ENV DETECTION
-# =========================================================
-detect_env() {
+echo "🧠 Detected OS: $OS_TYPE"
 
-  OS="$(uname -s)"
-  KERNEL="$(uname -r 2>/dev/null || echo "")"
+############################################
+# PACKAGE INSTALL HELPERS
+############################################
 
-  # macOS
-  if [[ "$OS" == "Darwin" ]]; then
-    echo "mac"
-    return
-  fi
-
-  # WSL
-  if grep -qi microsoft /proc/version 2>/dev/null; then
-    echo "wsl"
-    return
-  fi
-
-  # Termux
-  if [ -d "/data/data/com.termux" ]; then
-    echo "termux"
-    return
-  fi
-
-  # iSH (Alpine iOS shell)
-  if grep -qi alpine /etc/os-release 2>/dev/null && [[ "$KERNEL" == *"iSH"* || -f "/etc/alpine-release" ]]; then
-    echo "ish"
-    return
-  fi
-
-  # Linux distros
-  if [ -f /etc/os-release ]; then
-    . /etc/os-release
-
-    case "$ID" in
-      ubuntu) echo "ubuntu" ;;
-      debian) echo "debian" ;;
-      arch) echo "arch" ;;
-      manjaro) echo "arch" ;;
-      fedora) echo "fedora" ;;
-      centos) echo "centos" ;;
-      rhel) echo "rhel" ;;
-      almalinux) echo "alma" ;;
-      alpine) echo "alpine" ;;
-      *) echo "unknown" ;;
-    esac
-    return
-  fi
-
-  echo "unknown"
-}
-
-ENV=$(detect_env)
-echo "[BOOTSTRAP] Detected environment: $ENV"
-
-# =========================================================
-# PACKAGE INSTALLER ROUTER
-# =========================================================
-install_packages() {
-  PKGS="$@"
-
-  case "$ENV" in
-
-    mac)
-      brew install $PKGS
-      ;;
-
-    ubuntu|debian|wsl)
-      sudo apt-get update -y
-      sudo apt-get install -y $PKGS
-      ;;
-
-    fedora|rhel|alma)
-      sudo dnf install -y $PKGS
-      ;;
-
-    arch)
-      sudo pacman -Sy --noconfirm $PKGS
-      ;;
-
-    alpine|ish)
-      apk add --no-cache $PKGS
-      ;;
-
-    termux)
-      pkg update -y
-      pkg install -y $PKGS
-      ;;
-
-    *)
-      echo "[ERROR] Unsupported environment: $ENV"
-      exit 1
-      ;;
-  esac
-}
-
-# =========================================================
-# SYSTEM DEPENDENCIES
-# =========================================================
-install_system_deps() {
-  echo "[BOOTSTRAP] Installing system dependencies..."
-
-  install_packages git curl wget python3 python3-pip
-}
-
-# =========================================================
-# GH CLI
-# =========================================================
-ensure_gh() {
-
-  if command -v gh >/dev/null 2>&1; then
-    echo "[BOOTSTRAP] GitHub CLI already installed"
-    return
-  fi
-
-  echo "[BOOTSTRAP] Installing GitHub CLI..."
-
-  case "$ENV" in
-
-    ubuntu|debian|wsl)
-      sudo apt-get install -y gh || {
-        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli.gpg
-        echo "deb [arch=$(dpkg --print-architecture)] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list
-        sudo apt update -y
-        sudo apt install -y gh
-      }
-      ;;
-
-    fedora|rhel|alma)
-      sudo dnf install -y gh
-      ;;
-
-    arch)
-      sudo pacman -Sy --noconfirm github-cli
-      ;;
-
-    mac)
-      brew install gh
-      ;;
-
-    alpine|ish|termux)
-      echo "[BOOTSTRAP] gh not supported reliably here — using git fallback only"
-      ;;
-  esac
-}
-
-# =========================================================
-# AUTH
-# =========================================================
-ensure_auth() {
-  if command -v gh >/dev/null 2>&1; then
-    gh auth status >/dev/null 2>&1 || {
-      echo "[BOOTSTRAP] Running GitHub login..."
-      gh auth login --web
-    }
+install_linux() {
+  if command -v apt >/dev/null 2>&1; then
+    sudo apt update
+    sudo apt install -y git curl python3 python3-pip
+  elif command -v apk >/dev/null 2>&1; then
+    apk add git curl python3 py3-pip
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y git curl python3 python3-pip
+  elif command -v pacman >/dev/null 2>&1; then
+    sudo pacman -Sy git curl python python-pip
   else
-    echo "[BOOTSTRAP] Skipping gh auth (not available)"
+    echo "❌ Unsupported Linux package manager"
+    exit 1
   fi
 }
 
-# =========================================================
-# CLONE REPO (HYBRID)
-# =========================================================
-clone_repo() {
-
-  if [ -d "$TARGET_DIR" ]; then
-    echo "[BOOTSTRAP] Target directory already exists"
-    return
+install_mac() {
+  if ! command -v brew >/dev/null 2>&1; then
+    echo "❌ Homebrew required on macOS"
+    exit 1
   fi
-
-  echo "[BOOTSTRAP] Cloning repo: $REPO_FULL"
-
-  if command -v gh >/dev/null 2>&1; then
-    gh repo clone "$REPO_FULL" "$TARGET_DIR"
-  else
-    git clone "https://github.com/$REPO_FULL.git" "$TARGET_DIR"
-  fi
+  brew install git curl python
 }
 
-# =========================================================
-# PYTHON DEPS
-# =========================================================
-install_python_deps() {
-
-  if [ -f "$TARGET_DIR/requirements.txt" ]; then
-    echo "[BOOTSTRAP] Installing Python dependencies..."
-    python3 -m pip install --upgrade pip
-    python3 -m pip install -r "$TARGET_DIR/requirements.txt"
-  else
-    echo "[BOOTSTRAP] No requirements.txt found"
-  fi
+install_termux() {
+  pkg update -y
+  pkg install -y git curl python
 }
 
-# =========================================================
+install_ish() {
+  apk add git curl python3 py3-pip
+}
+
+install_windows() {
+  echo "⚠️ Windows detected (assumes Git Bash / WSL)"
+  echo "Please ensure git, python3, and pip are installed manually."
+}
+
+############################################
+# RUN DEP INSTALL
+############################################
+
+echo "📦 Checking base dependencies..."
+
+if ! command -v git >/dev/null 2>&1; then
+  echo "Installing git..."
+fi
+
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "Python3 missing, installing..."
+fi
+
+case "$OS_TYPE" in
+  linux) install_linux ;;
+  mac) install_mac ;;
+  termux) install_termux ;;
+  ish) install_ish ;;
+  windows) install_windows ;;
+esac
+
+############################################
+# GITHUB AUTH (GH CLI)
+############################################
+
+if command -v gh >/dev/null 2>&1; then
+  echo "🔐 GitHub CLI detected"
+else
+  echo "📦 Installing GitHub CLI..."
+  if [ "$OS_TYPE" = "linux" ]; then
+    type apt >/dev/null 2>&1 && sudo apt install -y gh || true
+    type dnf >/dev/null 2>&1 && sudo dnf install -y gh || true
+  elif [ "$OS_TYPE" = "mac" ]; then
+    brew install gh
+  fi
+fi
+
+echo "🔑 Running GitHub login..."
+gh auth login || true
+
+############################################
+# CLONE REPO
+############################################
+
+TARGET_DIR="${TARGET_DIR:-Kayden}"
+
+if [ -d "$TARGET_DIR" ]; then
+  echo "⚠️ Directory exists, skipping clone"
+else
+  echo "📥 Cloning repo..."
+  gh repo clone "$REPO_OWNER/$REPO_NAME" "$TARGET_DIR" || \
+  git clone "$GITHUB_REPO_URL" "$TARGET_DIR"
+fi
+
+cd "$TARGET_DIR"
+
+############################################
 # GIT CONFIG
-# =========================================================
-setup_git() {
+############################################
 
-  if [ ! -z "$GIT_USER_NAME" ]; then
-    git config --global user.name "$GIT_USER_NAME"
-  fi
+git config user.name "$GIT_USER_NAME"
+git config user.email "$GIT_USER_EMAIL"
 
-  if [ ! -z "$GIT_USER_EMAIL" ]; then
-    git config --global user.email "$GIT_USER_EMAIL"
-  fi
-}
+echo "✅ Git configured"
 
-# =========================================================
-# MAIN
-# =========================================================
-main() {
+############################################
+# PYTHON DEPENDENCIES
+############################################
 
-  install_system_deps
-  ensure_gh
-  ensure_auth
-  setup_git
-  clone_repo
-  install_python_deps
+if [ -f "requirements.txt" ]; then
+  echo "📦 Installing Python dependencies..."
+  python3 -m pip install --upgrade pip
+  pip install -r requirements.txt
+else
+  echo "⚠️ No requirements.txt found"
+fi
 
-  echo "[BOOTSTRAP] INSTALL COMPLETE"
-}
+############################################
+# DONE
+############################################
 
-main
+echo "🚀 Setup complete. System ready."
