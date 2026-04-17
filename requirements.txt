@@ -1,0 +1,10 @@
+git
+curl
+wget
+python3
+python3-pip
+build-essential
+jq
+openai
+dotenv
+beautifulsoup
