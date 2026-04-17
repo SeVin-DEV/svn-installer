@@ -1,15 +1,13 @@
-git
-curl
-wget
-python3
-python3-pip
-build-essential
-jq
-openai
-dotenv
-beautifulsoup
+# Core runtime
 requests
 python-dotenv
-PyGithub
+
+# Git + API tooling
+GitPython
+
+# Optional but commonly useful
 rich
-click
+pydantic
+
+# If your agent expands later
+aiohttp
