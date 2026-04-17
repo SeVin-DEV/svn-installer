@@ -1,137 +1,184 @@
 #!/usr/bin/env bash
-
 set -e
 
-########################################
-# LOAD INSTALLER ENV (.env)
-########################################
+# =========================
+# CONFIG
+# =========================
+REPO_URL="https://github.com/SeVin-DEV/kayden.git"
+PROJECT_DIR="kayden"
 
-ENV_FILE=".env"
+REQUIREMENTS_FILE="requirements.txt"
 
-if [ ! -f "$ENV_FILE" ]; then
-  echo "[ERROR] Missing .env file for setup_app.sh"
-  echo "Create it and add GitHub credentials + repo info."
-  exit 1
-fi
-
-# shellcheck disable=SC2046
-export $(grep -v '^#' "$ENV_FILE" | xargs)
-
-########################################
-# REQUIRED ENV VARS
-########################################
-
-: "${GITHUB_REPO_URL:?Missing GITHUB_REPO_URL in .env}"
-: "${TARGET_DIR:?Missing TARGET_DIR in .env}"
-: "${GIT_USER_NAME:?Missing GIT_USER_NAME in .env}"
-: "${GIT_USER_EMAIL:?Missing GIT_USER_EMAIL in .env}"
-
-########################################
-# DETECT OS
-########################################
-
-detect_os() {
-  if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-    if [ -f /etc/os-release ]; then
-      . /etc/os-release
-      echo "$ID"
-    else
-      echo "linux-unknown"
-    fi
-  elif [[ "$OSTYPE" == "darwin"* ]]; then
-    echo "macos"
-  else
-    echo "unknown"
-  fi
+# =========================
+# HELPERS
+# =========================
+log() {
+  echo -e "\033[1;32m[SETUP]\033[0m $1"
 }
 
-OS_TYPE=$(detect_os)
-echo "[BOOTSTRAP] Detected OS: $OS_TYPE"
+warn() {
+  echo -e "\033[1;33m[WARN]\033[0m $1"
+}
 
-########################################
+error() {
+  echo -e "\033[1;31m[ERROR]\033[0m $1"
+  exit 1
+}
+
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# =========================
+# OS DETECTION
+# =========================
+OS_TYPE="unknown"
+
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+  OS_TYPE="linux"
+elif [[ "$OSTYPE" == "darwin"* ]]; then
+  OS_TYPE="mac"
+elif [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
+  OS_TYPE="windows"
+fi
+
+log "Detected OS: $OS_TYPE"
+
+# =========================
 # INSTALL SYSTEM DEPENDENCIES
-########################################
+# =========================
+install_system_deps_linux() {
+  log "Installing system dependencies (Linux)..."
 
-if [ ! -f "requirements.txt" ]; then
-  echo "[ERROR] requirements.txt not found"
-  exit 1
-fi
+  sudo apt-get update -y
 
-install_linux() {
-  if command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get update
-    while read -r pkg; do
-      sudo apt-get install -y "$pkg"
-    done < requirements.txt
+  sudo apt-get install -y \
+    git \
+    curl \
+    wget \
+    python3 \
+    python3-pip \
+    python3-venv \
+    build-essential
+}
 
-  elif command -v dnf >/dev/null 2>&1; then
-    while read -r pkg; do
-      sudo dnf install -y "$pkg"
-    done < requirements.txt
+install_system_deps_mac() {
+  log "Installing system dependencies (macOS)..."
 
-  elif command -v pacman >/dev/null 2>&1; then
-    sudo pacman -Sy --noconfirm
-    while read -r pkg; do
-      sudo pacman -S --noconfirm "$pkg"
-    done < requirements.txt
+  if ! command_exists brew; then
+    error "Homebrew not found. Install it first: https://brew.sh"
+  fi
 
+  brew install git curl wget python
+}
+
+install_gh_cli() {
+  log "Checking GitHub CLI..."
+
+  if command_exists gh; then
+    log "GitHub CLI already installed."
+    return
+  fi
+
+  log "Installing GitHub CLI..."
+
+  if [[ "$OS_TYPE" == "linux" ]]; then
+    sudo apt-get install -y gh || {
+      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+      sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+      echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+      sudo apt update -y
+      sudo apt install -y gh
+    }
+  elif [[ "$OS_TYPE" == "mac" ]]; then
+    brew install gh
   else
-    echo "[ERROR] No supported package manager found."
-    exit 1
+    error "Unsupported OS for automatic gh install"
   fi
 }
 
-install_macos() {
-  if ! command -v brew >/dev/null 2>&1; then
-    echo "[BOOTSTRAP] Installing Homebrew..."
-    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-  fi
+# =========================
+# GITHUB AUTH
+# =========================
+github_login() {
+  log "Starting GitHub authentication..."
 
-  while read -r pkg; do
-    brew install "$pkg" || true
-  done < requirements.txt
+  gh auth status >/dev/null 2>&1 && {
+    log "Already authenticated with GitHub."
+    return
+  }
+
+  gh auth login --web || {
+    error "GitHub authentication failed."
+  }
 }
 
-echo "[BOOTSTRAP] Installing dependencies..."
+# =========================
+# CLONE REPO
+# =========================
+clone_repo() {
+  if [ -d "$PROJECT_DIR" ]; then
+    log "Repo already exists, skipping clone."
+    return
+  fi
 
-case "$OS_TYPE" in
-  ubuntu|debian) install_linux ;;
-  fedora) install_linux ;;
-  arch) install_linux ;;
-  macos) install_macos ;;
-  *) echo "[WARN] Unknown OS, skipping dependency install" ;;
-esac
+  log "Cloning repository..."
+  gh repo clone SeVin-DEV/kayden "$PROJECT_DIR" || {
+    error "Failed to clone repo."
+  }
+}
 
-########################################
-# CLONE OR UPDATE REPO
-########################################
+# =========================
+# GIT CONFIG
+# =========================
+setup_git_config() {
+  log "Configuring git..."
 
-if [ -d "$TARGET_DIR/.git" ]; then
-  echo "[BOOTSTRAP] Repo exists, pulling latest..."
-  cd "$TARGET_DIR"
-  git pull origin main || true
-  cd ..
-else
-  echo "[BOOTSTRAP] Cloning repo..."
-  git clone "$GITHUB_REPO_URL" "$TARGET_DIR"
-fi
+  read -p "Enter Git user.name: " git_name
+  read -p "Enter Git user.email: " git_email
 
-########################################
-# CONFIGURE GIT
-########################################
+  git config --global user.name "$git_name"
+  git config --global user.email "$git_email"
 
-cd "$TARGET_DIR"
+  log "Git configured."
+}
 
-git config user.name "$GIT_USER_NAME"
-git config user.email "$GIT_USER_EMAIL"
-git config pull.rebase true
-git config core.autocrlf input
+# =========================
+# PYTHON DEPENDENCIES
+# =========================
+install_python_deps() {
+  log "Installing Python dependencies..."
 
-cd ..
+  if [ ! -f "$PROJECT_DIR/$REQUIREMENTS_FILE" ]; then
+    warn "No requirements.txt found."
+    return
+  fi
 
-########################################
-# DONE
-########################################
+  python3 -m pip install --upgrade pip
+  python3 -m pip install -r "$PROJECT_DIR/$REQUIREMENTS_FILE"
+}
 
-echo "[BOOTSTRAP] Setup complete."
-echo "Target: $TARGET_DIR"
+# =========================
+# MAIN FLOW
+# =========================
+main() {
+  log "Starting setup wizard..."
+
+  if [[ "$OS_TYPE" == "linux" ]]; then
+    install_system_deps_linux
+  elif [[ "$OS_TYPE" == "mac" ]]; then
+    install_system_deps_mac
+  else
+    error "Unsupported OS"
+  fi
+
+  install_gh_cli
+  github_login
+  setup_git_config
+  clone_repo
+  install_python_deps
+
+  log "Setup complete. System is ready."
+}
+
+main
