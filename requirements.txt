@@ -8,3 +8,8 @@ jq
 openai
 dotenv
 beautifulsoup
+requests
+python-dotenv
+PyGithub
+rich
+click
